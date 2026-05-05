@@ -2,8 +2,11 @@ name: Daily Grant Update
 
 on:
   schedule:
-    - cron: '0 7 * * *'
+    - cron: '17 6 * * *'  # Runs daily at 06:17 UTC
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   run-scraper:
