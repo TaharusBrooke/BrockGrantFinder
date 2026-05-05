@@ -1,6 +1,6 @@
 name: Daily Grant Update
 
-"on":
+on:
   workflow_dispatch:
   schedule:
     - cron: "17 6 * * *"
@@ -27,12 +27,15 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run scraper
-        run: python ni_estate_grant_monitor.py
+        run: |
+          python ni_estate_grant_monitor.py
 
-      - name: Commit updated CSV
+      - name: Commit updated CSV files
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           git add colebrooke_grant_matches.csv grant_review_pages.csv
-          git commit -m "Daily grant update" || echo "No changes"
-          git push
+          git commit -m "Daily grant update" || echo "No changes to commit"
+          git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
