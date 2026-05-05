@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   run-scraper:
@@ -34,11 +35,8 @@ jobs:
 
       - name: Commit updated CSV files
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "actions@github.com"
-
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
           git add colebrooke_grant_matches.csv grant_review_pages.csv
-
           git commit -m "Daily grant update" || echo "No changes to commit"
-
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:main
+          git push origin HEAD:main
