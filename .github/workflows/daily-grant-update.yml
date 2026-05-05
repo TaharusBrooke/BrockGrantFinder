@@ -1,6 +1,6 @@
 name: Daily Grant Update
 
-on:
+"on":
   workflow_dispatch:
   schedule:
     - cron: "17 6 * * *"
@@ -33,6 +33,6 @@ jobs:
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-          git add colebrooke_grant_matches.csv
+          git add colebrooke_grant_matches.csv grant_review_pages.csv
           git commit -m "Daily grant update" || echo "No changes"
           git push
