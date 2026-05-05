@@ -1,6 +1,6 @@
 name: Daily Grant Update
 
-on:
+"on":
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
