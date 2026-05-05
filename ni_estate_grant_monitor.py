@@ -1,197 +1,85 @@
 import csv
+import io
 import re
-import sqlite3
-import warnings
+import time
+import urllib.robotparser
 from datetime import datetime, UTC
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
+from pypdf import PdfReader
 
-warnings.filterwarnings("ignore")
+RESULTS_CSV = "colebrooke_grant_matches.csv"
+REVIEW_CSV = "grant_review_pages.csv"
 
-CSV_PATH = "colebrooke_grant_matches.csv"
-DB_PATH = "seen.sqlite"
-MAX_PAGES = 150
+MAX_PAGES = 180
+RATE_LIMIT_SECONDS = 2
+
+USER_AGENT = "BrockGrantFinder/1.0 lawful public grant research contact: colebrookeestate@outlook.com"
 
 HEADERS = {
-    "User-Agent": "BrockGrantFinder/1.0",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Encoding": "identity",
-}
-
-BLOCKED_URL_PARTS = [
-    "/news",
-    "/news/",
-    "/press-release",
-    "/press-releases",
-    "/consultations",
-    "/publications",
-    "/statistics",
-    "/research",
-    "/search",
-    "?q=",
-    "search-results",
-    "translation",
-    "cookies",
-    "privacy",
-    "accessibility",
-    "contact",
-    "about-us",
-]
-
-BLOCKED_TITLES = [
-    "news",
-    "search results",
-    "search",
-    "publications",
-    "consultations",
-    "contact",
-    "about us",
-    "cookies",
-    "privacy notice",
-    "accessibility statement",
-    "grants and funding",
-    "environment grants",
-    "funding",
-    "support",
-]
-
-OPEN_PHRASES = [
-    "applications open",
-    "open for applications",
-    "apply now",
-    "you can apply",
-    "currently open",
-    "accepting applications",
-    "call is open",
-    "open call",
-    "fund is open",
-    "scheme is open",
-    "rolling basis",
-]
-
-CLOSED_PHRASES = [
-    "applications closed",
-    "closed for applications",
-    "scheme closed",
-    "fund closed",
-    "no longer accepting applications",
-    "no longer open",
-    "deadline has passed",
-    "this scheme is now closed",
-    "closed programme",
-    "archived",
-]
-
-SPECIFIC_GRANT_SIGNALS = [
-    "grant",
-    "funding",
-    "scheme",
-    "programme",
-    "application",
-    "apply",
-    "eligible",
-    "eligibility",
-    "deadline",
-    "closing date",
-    "capital grant",
-    "payment",
-    "support package",
-    "fund",
-]
-
-CATEGORY_KEYWORDS = {
-    "agriculture": [
-        "agriculture", "farm", "farmer", "farming", "farm business",
-        "livestock", "suckler", "beef", "sheep", "dairy", "poultry",
-        "chicken", "egg", "broiler", "hen", "agri"
-    ],
-    "forestry": [
-        "forestry", "woodland", "forest", "tree", "planting",
-        "woodland creation", "native woodland", "woodland management"
-    ],
-    "horticulture": [
-        "horticulture", "fruit", "vegetable", "glasshouse", "polytunnel",
-        "market garden", "orchard", "horticultural"
-    ],
-    "aquaculture": [
-        "aquaculture", "fish farm", "fisheries", "seafood", "marine",
-        "salmon", "shellfish", "pond"
-    ],
-    "heritage": [
-        "heritage", "historic", "listed building", "scheduled monument",
-        "archaeology", "traditional farm buildings", "conservation area"
-    ],
-    "tourism": [
-        "tourism", "visitor", "accommodation", "hotel", "glamping",
-        "camping", "events", "experience", "rural tourism", "hospitality"
-    ],
-    "roads_access_infrastructure": [
-        "road", "roads", "access", "lane", "track", "infrastructure",
-        "bridge", "path", "right of way", "public access", "greenway",
-        "walking", "cycling", "trail"
-    ],
-    "water_flood_drainage": [
-        "river", "watercourse", "water quality", "flood", "drainage",
-        "catchment", "wetland", "riparian", "natural flood management"
-    ],
-    "peatland_carbon": [
-        "peat", "peatland", "bog", "carbon", "net zero", "climate",
-        "emissions", "carbon farming"
-    ],
-    "biodiversity_conservation": [
-        "biodiversity", "habitat", "species", "nature", "conservation",
-        "ASSI", "SSSI", "wildlife", "rewilding", "nature recovery"
-    ],
-    "rural_business": [
-        "business", "enterprise", "rural business", "diversification",
-        "innovation", "capital grant", "productivity", "equipment"
-    ],
-    "energy_renewables": [
-        "renewable", "solar", "wind", "biomass", "energy efficiency",
-        "heat pump", "anaerobic digestion", "net zero"
-    ],
-    "national_lottery": [
-        "national lottery", "lottery funding", "community fund",
-        "heritage fund", "good causes"
-    ],
-}
-
-LAND_TYPES = {
-    "woodland": CATEGORY_KEYWORDS["forestry"],
-    "farmland": CATEGORY_KEYWORDS["agriculture"],
-    "horticulture": CATEGORY_KEYWORDS["horticulture"],
-    "aquaculture": CATEGORY_KEYWORDS["aquaculture"],
-    "poultry": ["poultry", "chicken", "broiler", "egg", "hen"],
-    "peatland": CATEGORY_KEYWORDS["peatland_carbon"],
-    "watercourses": CATEGORY_KEYWORDS["water_flood_drainage"],
-    "conservation": CATEGORY_KEYWORDS["biodiversity_conservation"],
-    "heritage": CATEGORY_KEYWORDS["heritage"],
-    "public access": CATEGORY_KEYWORDS["roads_access_infrastructure"],
-    "tourism": CATEGORY_KEYWORDS["tourism"],
-    "rural business": CATEGORY_KEYWORDS["rural_business"],
-    "energy": CATEGORY_KEYWORDS["energy_renewables"],
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8",
 }
 
 START_URLS = [
+    # Northern Ireland
+    "https://www.daera-ni.gov.uk/topics/grants-and-funding",
+    "https://www.daera-ni.gov.uk/articles/agricultural-environmental-scheme-details",
+    "https://www.daera-ni.gov.uk/articles/daera-forestry-grants",
+    "https://www.daera-ni.gov.uk/articles/rural-development-grants",
+    "https://www.daera-ni.gov.uk/articles/environment-fund-water-quality-improvement-strand",
+    "https://www.nidirect.gov.uk/articles/private-woodlands-plant-health-grants-and-funding",
+    "https://www.tourismni.com/about/funding-schemes/",
+    "https://www.nibusinessinfo.co.uk/content/funding-support-growing-tourism-business",
+    "https://www.investni.com/support-for-business",
+    "https://www.communities-ni.gov.uk/topics/historic-environment-funding-grants",
+    "https://communityfoundationni.org/grants/",
+    "https://www.ulsterwildlife.org/",
+    "https://theriverstrust.org/our-work/our-projects/sustainable-catchment-programme-northern-ireland",
+
+    # UK-wide / GB
     "https://www.find-government-grants.service.gov.uk/grants",
     "https://www.heritagefund.org.uk/funding",
     "https://www.tnlcommunityfund.org.uk/funding",
     "https://www.national-lottery.co.uk/good-causes/funding",
-    "https://www.tourismni.com/about/funding-schemes/",
-    "https://www.nibusinessinfo.co.uk/content/funding-support-growing-tourism-business",
-    "https://www.investni.com/support-for-business",
-    "https://www.daera-ni.gov.uk/articles/daera-forestry-grants",
-    "https://www.daera-ni.gov.uk/articles/agricultural-environmental-scheme-details",
-    "https://www.nidirect.gov.uk/articles/private-woodlands-plant-health-grants-and-funding",
-    "https://www.communities-ni.gov.uk/topics/historic-environment-funding-grants",
-    "https://www.seupb.eu/funding",
+    "https://www.woodlandtrust.org.uk/plant-trees/trees-for-landowners-and-farmers/",
+    "https://www.woodlandtrust.org.uk/plant-trees/schools-and-communities/",
+    "https://www.rspb.org.uk/",
+    "https://www.nationaltrust.org.uk/services/grants-and-funding",
+    "https://farminginnovation.ukri.org/",
+    "https://www.ukri.org/opportunity/",
+    "https://www.gov.uk/guidance/funding-for-farmers",
+    "https://www.gov.uk/guidance/england-woodland-creation-offer",
+
+    # Scotland
+    "https://www.ruralpayments.org/topics/all-schemes/",
+    "https://www.ruralpayments.org/topics/all-schemes/agri-environment-climate-scheme/",
+    "https://www.ruralpayments.org/topics/all-schemes/forestry-grant-scheme/",
+    "https://forestry.gov.scot/support-regulations/forestry-grants",
+
+    # Wales
+    "https://www.gov.wales/farming-and-countryside-grants",
+    "https://businesswales.gov.wales/",
+    "https://www.gov.wales/woodland-creation-grant-window-6-rules-booklet-html",
+    "https://www.gov.wales/sustainable-farming-scheme-2026-scheme-description-html",
+
+    # Republic of Ireland / border relevance
+    "https://www.gov.ie/en/department-of-agriculture-food-and-the-marine/collections/tams-3/",
+    "https://www.gov.ie/en/department-of-agriculture-food-and-the-marine/publications/forestry-grants-and-schemes/",
+    "https://www.gov.ie/en/department-of-agriculture-food-and-the-marine/collections/organic-farming-scheme/",
     "https://www.failteireland.ie/Supports.aspx",
-    "https://www.teagasc.ie/crops/forestry/grants/",
-    "https://www.gov.ie/en/department-of-rural-and-community-development/",
+    "https://www.catchments.ie/",
+    "https://www.npws.ie/legislation/national-biodiversity-action-plan/local-biodiversity-action-fund",
+
+    # Cross-border / EU
+    "https://www.seupb.eu/funding",
+    "https://www.interregeurope.eu/funding",
+    "https://environment.ec.europa.eu/funding_en",
     "https://cinea.ec.europa.eu/programmes/life_en",
+    "https://eu-cap-network.ec.europa.eu/publications/funding-opportunities-under-horizon-europe-calls-2026_en",
 ]
 
 ALLOWED_DOMAINS = [
@@ -201,137 +89,203 @@ ALLOWED_DOMAINS = [
     "nibusinessinfo.co.uk",
     "investni.com",
     "communities-ni.gov.uk",
-    "seupb.eu",
-    "gov.ie",
-    "teagasc.ie",
-    "failteireland.ie",
+    "communityfoundationni.org",
+    "ulsterwildlife.org",
+    "theriverstrust.org",
     "find-government-grants.service.gov.uk",
     "heritagefund.org.uk",
     "tnlcommunityfund.org.uk",
     "national-lottery.co.uk",
+    "woodlandtrust.org.uk",
+    "rspb.org.uk",
+    "nationaltrust.org.uk",
+    "farminginnovation.ukri.org",
+    "ukri.org",
+    "gov.uk",
+    "ruralpayments.org",
+    "forestry.gov.scot",
+    "gov.wales",
+    "businesswales.gov.wales",
+    "gov.ie",
+    "failteireland.ie",
+    "catchments.ie",
+    "npws.ie",
+    "seupb.eu",
+    "interregeurope.eu",
+    "environment.ec.europa.eu",
     "cinea.ec.europa.eu",
+    "eu-cap-network.ec.europa.eu",
 ]
+
+NI_LOCATION_KEYWORDS = [
+    "ni", "northern ireland", "fermanagh", "tyrone", "enniskillen",
+    "colebrooke", "fivemiletown", "armagh", "down", "antrim",
+    "derry", "londonderry", "cavan", "monaghan", "donegal",
+    "leitrim", "louth", "sligo", "border counties", "cross-border",
+]
+
+CATEGORY_KEYWORDS = {
+    "agriculture": ["farm", "farmer", "farming", "agriculture", "livestock", "dairy", "beef", "sheep", "poultry", "chicken", "eggs", "slurry"],
+    "forestry": ["woodland", "forestry", "trees", "tree planting", "afforestation", "native woodland", "shelterbelt"],
+    "biodiversity": ["biodiversity", "habitat", "species", "nature recovery", "conservation", "wildlife", "assi", "sssi"],
+    "water": ["river", "water quality", "catchment", "wetland", "flood", "riparian", "drainage", "nutrients"],
+    "heritage": ["heritage", "historic", "listed building", "monument", "traditional farm buildings", "archaeology"],
+    "tourism": ["tourism", "visitor", "experience", "accommodation", "hospitality", "glamping", "rural tourism"],
+    "rural_business": ["rural business", "enterprise", "micro-business", "diversification", "equipment", "capital grant"],
+    "horticulture": ["horticulture", "fruit", "vegetable", "glasshouse", "polytunnel", "orchard"],
+    "aquaculture": ["aquaculture", "fisheries", "fish farm", "shellfish", "marine"],
+    "energy": ["solar", "renewable", "energy efficiency", "biomass", "heat pump", "net zero"],
+}
+
+OPEN_PHRASES = [
+    "applications are open", "applications open", "open for applications",
+    "apply now", "you can apply", "currently open", "accepting applications",
+    "call is open", "open call", "rolling basis", "open all year",
+]
+
+CLOSED_PHRASES = [
+    "applications closed", "closed for applications", "scheme closed",
+    "fund closed", "no longer accepting applications", "deadline has passed",
+    "this scheme is now closed", "archived",
+]
+
+GRANT_SIGNALS = [
+    "grant", "funding", "fund", "scheme", "programme", "application",
+    "apply", "eligible", "eligibility", "deadline", "closing date",
+    "capital grant", "payment", "support",
+]
+
+SOFT_NEGATIVE_URL_PARTS = [
+    "/news", "/press-release", "/press-releases", "/publications",
+    "/consultations", "/statistics", "/research", "/search", "search-results",
+]
+
+HARD_BLOCKED_URL_PARTS = [
+    "login", "signin", "account", "privacy", "cookies", "accessibility",
+    "terms-and-conditions", "contact-us", "mailto:",
+]
+
+robots_cache = {}
 
 
 def clean(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-def contains_any(text, phrases):
-    text_l = text.lower()
-    return any(phrase.lower() in text_l for phrase in phrases)
+def allowed_domain(url):
+    domain = urlparse(url).netloc.lower().replace("www.", "")
+    return any(domain.endswith(d.replace("www.", "")) for d in ALLOWED_DOMAINS)
 
 
-def is_blocked_url(url):
-    url_l = url.lower()
+def robots_allowed(url):
+    parsed = urlparse(url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
 
-    if any(part in url_l for part in BLOCKED_URL_PARTS):
-        return True
+    if base not in robots_cache:
+        rp = urllib.robotparser.RobotFileParser()
+        rp.set_url(urljoin(base, "/robots.txt"))
 
-    if "daera-ni.gov.uk/news" in url_l:
-        return True
+        try:
+            rp.read()
+            robots_cache[base] = rp
+        except Exception:
+            return False
 
-    if "find-government-grants.service.gov.uk/grants" == url_l.rstrip("/"):
-        return True
-
-    return False
+    return robots_cache[base].can_fetch(USER_AGENT, url)
 
 
 def fetch(url):
+    if not allowed_domain(url):
+        return None, "domain not approved"
+
+    if not robots_allowed(url):
+        return None, "robots.txt disallows access"
+
+    if any(part in url.lower() for part in HARD_BLOCKED_URL_PARTS):
+        return None, "blocked URL"
+
+    time.sleep(RATE_LIMIT_SECONDS)
+
     try:
-        response = requests.get(url, timeout=20, headers=HEADERS)
+        response = requests.get(url, timeout=25, headers=HEADERS)
         response.raise_for_status()
-
-        content_type = response.headers.get("Content-Type", "").lower()
-
-        if "text/html" not in content_type and "application/xhtml" not in content_type:
-            print(f"Skipping non-webpage file: {url}")
-            return ""
-
-        return response.text
-
+        return response, ""
     except Exception as e:
-        print(f"Could not open: {url}")
-        print(e)
-        return ""
+        return None, f"request failed: {e}"
 
 
 def remove_junk(soup):
-    for tag in soup([
-        "script", "style", "nav", "footer", "header", "aside",
-        "form", "button", "select", "option"
-    ]):
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "button", "select", "option"]):
         tag.decompose()
-
-    for selector in [
-        ".translation-help",
-        ".language-switcher",
-        ".cookie-banner",
-        ".govuk-cookie-banner",
-        ".site-footer",
-        ".site-header",
-        ".navigation",
-        ".menu",
-    ]:
-        for element in soup.select(selector):
-            element.decompose()
 
     return soup
 
 
-def extract_main_text(soup):
+def extract_html_text(response):
+    soup = BeautifulSoup(response.text, "html.parser")
     soup = remove_junk(soup)
 
-    main = (
-        soup.find("main")
-        or soup.find("article")
-        or soup.find("div", {"role": "main"})
-        or soup.body
-        or soup
-    )
+    title_tag = soup.find("h1") or soup.find("title")
+    title = clean(title_tag.get_text(" ", strip=True)) if title_tag else response.url
 
-    return clean(main.get_text(" ", strip=True))
+    main = soup.find("main") or soup.find("article") or soup.body or soup
+    text = clean(main.get_text(" ", strip=True))
 
+    meta = soup.select_one("meta[name='description']") or soup.select_one("meta[property='og:description']")
+    meta_description = clean(meta.get("content")) if meta and meta.get("content") else ""
 
-def extract_title(soup, url):
-    h1 = soup.find("h1")
-
-    if h1:
-        return clean(h1.get_text(" ", strip=True))
-
-    title = soup.find("title")
-
-    if title:
-        return clean(title.get_text(" ", strip=True))
-
-    return url
+    return title, text, meta_description, soup
 
 
-def classify_categories(text):
-    text_l = text.lower()
-    categories = []
+def extract_pdf_text(response):
+    try:
+        reader = PdfReader(io.BytesIO(response.content))
+        pages = []
 
-    for category, words in CATEGORY_KEYWORDS.items():
-        if any(word.lower() in text_l for word in words):
-            categories.append(category)
+        for page in reader.pages[:12]:
+            pages.append(page.extract_text() or "")
 
-    return ", ".join(categories)
+        text = clean(" ".join(pages))
+        title = response.url.split("/")[-1].replace("-", " ").replace(".pdf", "")
+        return title, text, "", None
+    except Exception as e:
+        return response.url, "", "", None
 
 
-def classify_land_type(text):
-    text_l = text.lower()
-    types = []
+def extract_page_content(response):
+    content_type = response.headers.get("Content-Type", "").lower()
+    url_l = response.url.lower()
 
-    for land_type, words in LAND_TYPES.items():
-        if any(word.lower() in text_l for word in words):
-            types.append(land_type)
+    if "pdf" in content_type or url_l.endswith(".pdf"):
+        return extract_pdf_text(response)
 
-    return ", ".join(types)
+    return extract_html_text(response)
+
+
+def extract_links(base_url, soup):
+    if soup is None:
+        return []
+
+    links = []
+
+    for a in soup.find_all("a", href=True):
+        href = urljoin(base_url, a["href"])
+        label = clean(a.get_text(" ", strip=True))
+        combined = f"{label} {href}".lower()
+
+        if not allowed_domain(href):
+            continue
+
+        if any(part in href.lower() for part in HARD_BLOCKED_URL_PARTS):
+            continue
+
+        if any(signal in combined for signal in GRANT_SIGNALS + list(sum(CATEGORY_KEYWORDS.values(), []))):
+            links.append(href)
+
+    return list(dict.fromkeys(links))
 
 
 def extract_money_values(text):
-    values = []
-
     patterns = [
         r"up to\s+£\s?\d[\d,]*(?:\.\d+)?\s?(?:million|m|k)?",
         r"up to\s+€\s?\d[\d,]*(?:\.\d+)?\s?(?:million|m|k)?",
@@ -340,44 +294,48 @@ def extract_money_values(text):
         r"\d[\d,]*(?:\.\d+)?\s?(?:per hectare|/ha)",
     ]
 
-    for pattern in patterns:
-        for match in re.findall(pattern, text, re.IGNORECASE):
-            values.append(clean(match))
+    values = []
 
-    return sorted(set(values))[:8]
+    for pattern in patterns:
+        values.extend(re.findall(pattern, text, re.IGNORECASE))
+
+    return sorted(set(clean(v) for v in values))[:10]
 
 
 def extract_deadlines(text):
-    patterns = [
-        r"(closing date|deadline|closes|applications close|apply by|closing)\s.{0,100}",
-        r"\b\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b",
-        r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
+    deadline_context_patterns = [
+        r"(closing date|deadline|applications close|apply by|closing deadline|submission deadline|call closes)\s.{0,120}",
+        r".{0,40}(closing date|deadline|applications close|apply by|call closes).{0,80}",
     ]
 
+    parsed_dates = []
     phrases = []
-    parsed = []
 
-    for pattern in patterns:
+    for pattern in deadline_context_patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             phrase = clean(match.group(0))
-            phrases.append(phrase)
+            phrase_l = phrase.lower()
+
+            if any(bad in phrase_l for bad in ["published", "updated", "event", "webinar", "meeting"]):
+                continue
 
             try:
-                parsed_date = dateparser.parse(phrase, fuzzy=True, dayfirst=True)
-                if parsed_date:
-                    parsed.append(parsed_date.date().isoformat())
+                date = dateparser.parse(phrase, fuzzy=True, dayfirst=True)
+                if date:
+                    parsed_dates.append(date.date().isoformat())
+                    phrases.append(phrase)
             except Exception:
                 pass
 
-    return sorted(set(phrases))[:5], sorted(set(parsed))
+    return sorted(set(parsed_dates)), sorted(set(phrases))[:6]
 
 
-def has_future_deadline(deadlines):
+def future_deadline(deadlines):
     today = datetime.now(UTC).date()
 
-    for deadline in deadlines:
+    for d in deadlines:
         try:
-            if datetime.fromisoformat(deadline).date() >= today:
+            if datetime.fromisoformat(d).date() >= today:
                 return True
         except Exception:
             pass
@@ -385,249 +343,250 @@ def has_future_deadline(deadlines):
     return False
 
 
-def is_open_available_grant(title, text, url, deadlines):
-    title_l = title.lower()
+def classify(text, keyword_map):
     text_l = text.lower()
-    url_l = url.lower()
+    matches = []
 
-    if is_blocked_url(url):
-        return False
+    for label, words in keyword_map.items():
+        if any(word.lower() in text_l for word in words):
+            matches.append(label)
 
-    if title_l.strip() in BLOCKED_TITLES:
-        return False
-
-    if contains_any(text_l, CLOSED_PHRASES):
-        return False
-
-    specific_signal_count = sum(
-        1 for signal in SPECIFIC_GRANT_SIGNALS
-        if signal in title_l or signal in text_l or signal in url_l
-    )
-
-    if specific_signal_count < 3:
-        return False
-
-    has_open_signal = contains_any(text_l, OPEN_PHRASES)
-    has_deadline = has_future_deadline(deadlines)
-
-    if not has_open_signal and not has_deadline:
-        return False
-
-    if len(text_l) < 350:
-        return False
-
-    if title_l in ["search results", "news", "funding", "grants"]:
-        return False
-
-    return True
+    return ", ".join(matches)
 
 
-def grant_value_score(values):
-    joined = " ".join(values).lower()
-    score = 0
+def infer_source_region(url):
+    domain = urlparse(url).netloc.lower()
 
-    if "million" in joined:
-        score += 20
-    if "£" in joined or "€" in joined:
-        score += 12
-    if "per hectare" in joined or "/ha" in joined:
-        score += 8
-    if "up to" in joined:
-        score += 6
-
-    return score
-
-
-def score_text(title, text, url, money_values):
-    text_l = text.lower()
-    title_l = title.lower()
-    url_l = url.lower()
-    score = 0
-
-    if any(x in text_l for x in ["northern ireland", "fermanagh", "daera", "tourism ni", "invest ni"]):
-        score += 15
-
-    if any(x in text_l for x in ["farmer", "farm", "landowner", "land manager", "rural business"]):
-        score += 10
-
-    if contains_any(text_l, OPEN_PHRASES):
-        score += 15
-
-    if any(x in url_l for x in ["grant", "funding", "scheme", "support", "programme"]):
-        score += 8
-
-    for category_words in CATEGORY_KEYWORDS.values():
-        for word in category_words:
-            if word.lower() in text_l or word.lower() in title_l:
-                score += 1
-
-    score += grant_value_score(money_values)
-
-    return score
-
-
-def source_region_from_url(url):
-    if any(x in url for x in [
-        "daera-ni.gov.uk", "nidirect.gov.uk", "tourismni.com",
-        "investni.com", "nibusinessinfo.co.uk", "communities-ni.gov.uk"
-    ]):
+    if any(d in domain for d in ["daera-ni.gov.uk", "nidirect.gov.uk", "tourismni.com", "investni.com", "communities-ni.gov.uk", "communityfoundationni.org"]):
         return "Northern Ireland"
 
-    if any(x in url for x in [
-        "gov.ie", "teagasc.ie", "failteireland.ie"
-    ]):
+    if any(d in domain for d in ["gov.ie", "failteireland.ie", "catchments.ie", "npws.ie"]):
         return "Republic of Ireland"
 
-    if "seupb.eu" in url:
-        return "Cross-border / PEACEPLUS"
+    if any(d in domain for d in ["ruralpayments.org", "forestry.gov.scot"]):
+        return "Scotland"
 
-    if "cinea.ec.europa.eu" in url:
-        return "EU"
+    if "gov.wales" in domain or "businesswales" in domain:
+        return "Wales"
 
-    return "UK-wide / mainland UK"
+    if any(d in domain for d in ["environment.ec.europa.eu", "cinea.ec.europa.eu", "eu-cap-network.ec.europa.eu", "interregeurope.eu"]):
+        return "EU / international"
 
+    if "seupb.eu" in domain:
+        return "Cross-border"
 
-def extract_links(base_url, soup):
-    links = []
-
-    for a in soup.find_all("a", href=True):
-        href = urljoin(base_url, a["href"])
-        label = clean(a.get_text(" ", strip=True))
-        combined = f"{label} {href}".lower()
-
-        if is_blocked_url(href):
-            continue
-
-        if not any(domain in href for domain in ALLOWED_DOMAINS):
-            continue
-
-        if any(x in combined for x in [
-            "grant", "fund", "funding", "scheme", "support", "programme",
-            "application", "apply", "forestry", "woodland", "farm",
-            "agriculture", "horticulture", "aquaculture", "poultry",
-            "chicken", "heritage", "tourism", "lottery", "road",
-            "infrastructure", "water", "flood", "peat", "business",
-            "rural", "energy", "renewable"
-        ]):
-            links.append(href)
-
-    return list(dict.fromkeys(links))
+    return "UK-wide"
 
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("CREATE TABLE IF NOT EXISTS seen(url TEXT PRIMARY KEY)")
-    conn.commit()
-    return conn
+def infer_eligibility_region(text, url):
+    text_l = text.lower()
+    regions = []
+
+    region_terms = {
+        "Northern Ireland": ["northern ireland", " ni ", "daera", "fermanagh", "tyrone", "enniskillen", "armagh", "antrim", "down", "londonderry", "derry"],
+        "Republic of Ireland": ["republic of ireland", "ireland", "cavan", "monaghan", "donegal", "leitrim", "louth", "sligo"],
+        "England": ["england", "defra", "rpa"],
+        "Scotland": ["scotland", "scottish"],
+        "Wales": ["wales", "welsh", "cymru"],
+        "Cross-border": ["cross-border", "peaceplus", "interreg", "border counties"],
+        "EU / international": ["european union", "horizon europe", "life programme", "eu applicants", "international"],
+    }
+
+    for region, terms in region_terms.items():
+        if any(term in text_l for term in terms):
+            regions.append(region)
+
+    if not regions:
+        regions.append(infer_source_region(url))
+
+    return ", ".join(sorted(set(regions)))
 
 
-def is_new(conn, url):
-    cur = conn.execute("SELECT 1 FROM seen WHERE url=?", (url,))
+def score_page(title, text, url, money_values, deadlines):
+    combined = f"{title} {text} {url}".lower()
+    score = 0
+    reasons = []
 
-    if cur.fetchone():
-        return False
+    grant_signal_count = sum(1 for signal in GRANT_SIGNALS if signal in combined)
+    category_matches = classify(combined, CATEGORY_KEYWORDS)
 
-    conn.execute("INSERT INTO seen VALUES(?)", (url,))
-    conn.commit()
+    if grant_signal_count:
+        score += grant_signal_count * 4
+        reasons.append(f"{grant_signal_count} grant signals")
 
-    return True
+    if category_matches:
+        score += 15
+        reasons.append(f"category keywords: {category_matches}")
+
+    if any(term in combined for term in NI_LOCATION_KEYWORDS):
+        score += 20
+        reasons.append("NI / border region keywords")
+
+    if any(phrase in combined for phrase in OPEN_PHRASES):
+        score += 20
+        reasons.append("matched open phrase")
+
+    if future_deadline(deadlines):
+        score += 25
+        reasons.append("future deadline found")
+
+    if money_values:
+        score += 15
+        reasons.append("money value found")
+
+    if any(part in url.lower() for part in SOFT_NEGATIVE_URL_PARTS):
+        score -= 15
+        reasons.append("news / publication / search URL penalty")
+
+    if any(phrase in combined for phrase in CLOSED_PHRASES):
+        score -= 40
+        reasons.append("closed phrase found")
+
+    return score, "; ".join(reasons), category_matches
+
+
+def short_summary(meta_description, text):
+    if meta_description and len(meta_description) > 40:
+        return meta_description[:700]
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    useful = [
+        s for s in sentences
+        if len(s) > 60
+        and "cookie" not in s.lower()
+        and "language" not in s.lower()
+        and "skip to" not in s.lower()
+    ]
+
+    return clean(" ".join(useful[:3]))[:700]
+
+
+def review_reason(score, reasons, deadlines, text):
+    text_l = text.lower()
+
+    if "closed phrase found" in reasons:
+        return "closed phrase found"
+
+    if score < 35:
+        return "score too low"
+
+    if not future_deadline(deadlines) and not any(p in text_l for p in OPEN_PHRASES):
+        return "no future deadline or open phrase"
+
+    if "grant signals" not in reasons:
+        return "not enough grant signals"
+
+    return "borderline / needs manual review"
 
 
 def main():
-    print("Starting Brock Grant Finder scraper...")
-
-    conn = init_db()
     queue = list(START_URLS)
     visited = set()
-    results = []
-    new_count = 0
+    accepted = []
+    review = []
+
+    print("Starting lawful public grant monitor...")
 
     while queue and len(visited) < MAX_PAGES:
         url = queue.pop(0)
 
-        if url in visited or is_blocked_url(url):
+        if url in visited:
             continue
 
         visited.add(url)
         print(f"Checking: {url}")
 
-        html = fetch(url)
+        response, fetch_reason = fetch(url)
 
-        if not html:
+        if response is None:
+            review.append({
+                "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "url": url,
+                "title": "",
+                "source_region": infer_source_region(url),
+                "eligibility_region": "",
+                "score": 0,
+                "review_reason": fetch_reason,
+                "reason_found": "",
+                "snippet": "",
+            })
             continue
 
-        try:
-            soup = BeautifulSoup(html, "html.parser")
-        except Exception as e:
-            print(f"Could not parse page: {url}")
-            print(e)
+        title, text, meta_description, soup = extract_page_content(response)
+
+        if not text:
+            review.append({
+                "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "url": response.url,
+                "title": title,
+                "source_region": infer_source_region(response.url),
+                "eligibility_region": "",
+                "score": 0,
+                "review_reason": "no readable text",
+                "reason_found": "",
+                "snippet": "",
+            })
             continue
 
-        title = extract_title(soup, url)
-        text = extract_main_text(soup)
-
-        deadline_phrases, deadline_dates = extract_deadlines(text)
         money_values = extract_money_values(text)
+        deadlines, deadline_phrases = extract_deadlines(text)
+        score, reason_found, categories = score_page(title, text, response.url, money_values, deadlines)
+        eligibility_region = infer_eligibility_region(text, response.url)
 
-        if is_open_available_grant(title, text, url, deadline_dates):
-            category = classify_categories(text + " " + title)
-            land_types = classify_land_type(text + " " + title)
-            score = score_text(title, text, url, money_values)
-            source_region = source_region_from_url(url)
+        row = {
+            "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "title": title,
+            "url": response.url,
+            "source_region": infer_source_region(response.url),
+            "eligibility_region": eligibility_region,
+            "category": categories,
+            "score": score,
+            "possible_grant_values": ", ".join(money_values),
+            "deadline_dates": ", ".join(deadlines),
+            "deadline_phrases": " | ".join(deadline_phrases),
+            "reason_found": reason_found,
+            "snippet": short_summary(meta_description, text),
+        }
 
-            if score >= 25:
-                record = {
-                    "last_checked": datetime.now(UTC).isoformat(timespec="seconds"),
-                    "title": title,
-                    "url": url,
-                    "source_region": source_region,
-                    "category": category,
-                    "is_open": True,
-                    "score": score,
-                    "land_types": land_types,
-                    "possible_grant_values": ", ".join(money_values),
-                    "deadline_dates": ", ".join(deadline_dates),
-                    "deadline_phrases": " | ".join(deadline_phrases),
-                    "snippet": text[:750],
-                }
+        if score >= 55 and ("future deadline found" in reason_found or "matched open phrase" in reason_found):
+            accepted.append(row)
+        else:
+            review_row = row.copy()
+            review_row["review_reason"] = review_reason(score, reason_found, deadlines, text)
+            review.append(review_row)
 
-                results.append(record)
-
-                if is_new(conn, url):
-                    new_count += 1
-
-        for link in extract_links(url, soup):
+        for link in extract_links(response.url, soup):
             if link not in visited and link not in queue:
                 queue.append(link)
 
-    results.sort(key=lambda r: r["score"], reverse=True)
+    accepted.sort(key=lambda r: r["score"], reverse=True)
+    review.sort(key=lambda r: r.get("score", 0), reverse=True)
 
-    fieldnames = [
-        "last_checked",
-        "title",
-        "url",
-        "source_region",
-        "category",
-        "is_open",
-        "score",
-        "land_types",
-        "possible_grant_values",
-        "deadline_dates",
-        "deadline_phrases",
-        "snippet",
+    result_fields = [
+        "checked_at", "title", "url", "source_region", "eligibility_region",
+        "category", "score", "possible_grant_values", "deadline_dates",
+        "deadline_phrases", "reason_found", "snippet"
     ]
 
-    with open(CSV_PATH, "w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
+    review_fields = result_fields + ["review_reason"]
+
+    with open(RESULTS_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=result_fields)
         writer.writeheader()
-        writer.writerows(results)
+        writer.writerows(accepted)
+
+    with open(REVIEW_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=review_fields)
+        writer.writeheader()
+        writer.writerows(review)
 
     print("")
     print("Finished.")
     print(f"Pages checked: {len(visited)}")
-    print(f"Open specific grant matches found: {len(results)}")
-    print(f"New matches since last run: {new_count}")
-    print(f"Results saved to: {CSV_PATH}")
+    print(f"Accepted grants: {len(accepted)}")
+    print(f"Review pages: {len(review)}")
+    print(f"Results saved to: {RESULTS_CSV}")
+    print(f"Review saved to: {REVIEW_CSV}")
 
 
 if __name__ == "__main__":
